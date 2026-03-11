@@ -3,6 +3,8 @@ using GeminiDotnet.V1Beta;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+#pragma warning disable CS0618 // Obsolete types kept for backward-compatible JSON serialization
+
 namespace GeminiDotnet.Extensions.AI;
 
 [JsonSourceGenerationOptions(

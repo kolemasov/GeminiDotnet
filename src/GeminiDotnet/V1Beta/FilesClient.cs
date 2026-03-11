@@ -18,7 +18,26 @@ internal sealed partial class FilesClient : IFilesClient
         string? pageToken = null,
         CancellationToken cancellationToken = default)
     {
-        const string path = "/v1beta/files";
+        var path = "/v1beta/files";
+
+        // Build query string from the optional pagination parameters.
+        List<string> queryParams = [];
+
+        if (pageSize is not null)
+        {
+            queryParams.Add($"pageSize={pageSize.Value}");
+        }
+
+        if (pageToken is not null)
+        {
+            queryParams.Add($"pageToken={Uri.EscapeDataString(pageToken)}");
+        }
+
+        if (queryParams.Count > 0)
+        {
+            path = $"{path}?{string.Join('&', queryParams)}";
+        }
+
         return _requester.ExecuteAsync<ListFilesResponse>(HttpMethod.Get, path, cancellationToken);
     }
 

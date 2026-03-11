@@ -1,9 +1,11 @@
-using GeminiDotnet.Extensions.AI.Contents;
 using GeminiDotnet.V1Beta;
 using GeminiDotnet.V1Beta.Models;
 using Microsoft.Extensions.AI;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+
+#pragma warning disable MEAI001 // Experimental API (CodeInterpreter*, WebSearchTool*Content)
 
 namespace GeminiDotnet.Extensions.AI;
 
@@ -17,6 +19,8 @@ internal static class GeminiToMEAIMapper
 
         // Map content parts
         var contents = CreateMappedContents(candidate?.Content?.Parts) ?? [];
+
+        AppendMappedGroundingMetadata(contents, candidate?.GroundingMetadata);
 
         // Add UsageContent for streaming aggregation (consumed by ToChatResponse())
         if (CreateMappedUsageDetails(response.UsageMetadata) is { } usageDetails)
@@ -79,6 +83,10 @@ internal static class GeminiToMEAIMapper
 
         List<AIContent> contents = new(parts.Count);
 
+        // Gemini emits ExecutableCode immediately followed by CodeExecutionResult.
+        // We generate a CallId on the call and carry it forward to the result for correlation.
+        string? lastCodeInterpreterCallId = null;
+
         foreach (var part in parts)
         {
             // Each Part should have exactly one property set. Using else-if makes
@@ -108,11 +116,14 @@ internal static class GeminiToMEAIMapper
             }
             else if (part.ExecutableCode is not null)
             {
-                mapped = CreateMappedExecutableCodeContent(part);
+                var callId = Guid.NewGuid().ToString();
+                lastCodeInterpreterCallId = callId;
+                mapped = CreateMappedCodeInterpreterToolCallContent(part, callId);
             }
             else if (part.CodeExecutionResult is not null)
             {
-                mapped = CreateMappedCodeExecutionResultContent(part);
+                mapped = CreateMappedCodeInterpreterToolResultContent(part, lastCodeInterpreterCallId);
+                lastCodeInterpreterCallId = null;
             }
             else
             {
@@ -214,46 +225,108 @@ internal static class GeminiToMEAIMapper
             };
         }
 
-        static ExecutableCodeContent CreateMappedExecutableCodeContent(Part part)
+        static CodeInterpreterToolCallContent CreateMappedCodeInterpreterToolCallContent(Part part, string callId)
         {
             Debug.Assert(part.ExecutableCode is not null);
 
             var executableCode = part.ExecutableCode!;
 
-            return new ExecutableCodeContent
+            // Map language to a MIME type for the DataContent input.
+            var mediaType = executableCode.Language switch
             {
+                ExecutableCodeLanguage.Python => "text/x-python",
+                _ => "text/plain",
+            };
+
+            var codeBytes = System.Text.Encoding.UTF8.GetBytes(executableCode.Code);
+
+            return new CodeInterpreterToolCallContent(callId)
+            {
+                Inputs = [new DataContent(codeBytes, mediaType)],
                 Annotations = null,
-                Language = executableCode.Language,
-                Code = executableCode.Code,
                 RawRepresentation = part,
                 AdditionalProperties = null
             };
         }
 
-        static CodeExecutionContent CreateMappedCodeExecutionResultContent(Part part)
+        static CodeInterpreterToolResultContent CreateMappedCodeInterpreterToolResultContent(Part part, string? callId)
         {
             Debug.Assert(part.CodeExecutionResult is not null);
 
             var codeExecutionResult = part.CodeExecutionResult!;
 
-            return new CodeExecutionContent
+            var outputs = new List<AIContent>();
+            if (codeExecutionResult.Output is { } output)
             {
+                outputs.Add(new TextContent(output));
+            }
+
+            return new CodeInterpreterToolResultContent(callId ?? string.Empty)
+            {
+                Outputs = outputs,
                 Annotations = null,
-                Output = codeExecutionResult.Output,
-                Status = codeExecutionResult.Outcome switch
-                {
-                    CodeExecutionResultOutcome.Unspecified => CodeExecutionStatus.None,
-                    CodeExecutionResultOutcome.Ok => CodeExecutionStatus.Success,
-                    CodeExecutionResultOutcome.Failed => CodeExecutionStatus.Error,
-                    CodeExecutionResultOutcome.DeadlineExceeded => CodeExecutionStatus.Timeout,
-                    _ => throw new ArgumentOutOfRangeException(nameof(codeExecutionResult.Outcome),
-                        codeExecutionResult.Outcome,
-                        null)
-                },
                 RawRepresentation = part,
-                AdditionalProperties = null
+                AdditionalProperties = codeExecutionResult.Outcome is not CodeExecutionResultOutcome.Unspecified
+                    ? new() { ["outcome"] = codeExecutionResult.Outcome.ToString() }
+                    : null,
             };
         }
+    }
+
+    private static void AppendMappedGroundingMetadata(List<AIContent> contents, GroundingMetadata? groundingMetadata)
+    {
+        if (groundingMetadata is null)
+        {
+            return;
+        }
+
+        var hasQueries = groundingMetadata.WebSearchQueries is { Count: > 0 };
+        var hasChunks = groundingMetadata.GroundingChunks is { Count: > 0 };
+
+        if (!hasQueries && !hasChunks)
+        {
+            return;
+        }
+
+        var callId = $"web-search/{Guid.NewGuid()}";
+
+        var toolCall = new WebSearchToolCallContent(callId)
+        {
+            Queries = groundingMetadata.WebSearchQueries is { } queries ? [.. queries] : null,
+            RawRepresentation = groundingMetadata,
+        };
+
+        List<AIContent>? results = null;
+        if (groundingMetadata.GroundingChunks is { } chunks)
+        {
+            results = new(chunks.Count);
+            foreach (var chunk in chunks)
+            {
+                if (chunk.Web is not { } web)
+                {
+                    continue;
+                }
+
+                var uriContent = new UriContent(web.Uri ?? string.Empty, "text/html")
+                {
+                    RawRepresentation = chunk,
+                    AdditionalProperties = web.Title is not null
+                        ? new() { ["title"] = web.Title }
+                        : null,
+                };
+
+                results.Add(uriContent);
+            }
+        }
+
+        var toolResult = new WebSearchToolResultContent(callId)
+        {
+            Results = results,
+            RawRepresentation = groundingMetadata,
+        };
+
+        contents.Add(toolCall);
+        contents.Add(toolResult);
     }
 
     public static ChatResponse CreateMappedChatResponse(GenerateContentResponse response, DateTimeOffset createdAt)
@@ -275,12 +348,15 @@ internal static class GeminiToMEAIMapper
 
         static ChatMessage CreateMappedChatMessage(Candidate candidateResponse)
         {
+            var contents = CreateMappedContents(candidateResponse.Content?.Parts) ?? [];
+            AppendMappedGroundingMetadata(contents, candidateResponse.GroundingMetadata);
+
             return new ChatMessage
             {
                 AuthorName = null,
                 CreatedAt = null,
                 Role = CreateMappedChatRole(candidateResponse.Content?.Role),
-                Contents = CreateMappedContents(candidateResponse.Content?.Parts) ?? [],
+                Contents = contents,
                 MessageId = null,
                 RawRepresentation = candidateResponse,
                 AdditionalProperties = null
