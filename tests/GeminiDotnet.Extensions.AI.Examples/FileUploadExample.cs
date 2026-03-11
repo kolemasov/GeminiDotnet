@@ -1,5 +1,7 @@
-using GeminiDotnet.V1Beta;
 using Microsoft.Extensions.AI;
+using System.Diagnostics.CodeAnalysis;
+
+#pragma warning disable MEAI001 // Type is for evaluation purposes only
 
 namespace GeminiDotnet.Extensions.AI.Examples;
 
@@ -10,7 +12,9 @@ public sealed class FileUploadExample
         var geminiClient = chatClient.GetService(typeof(IGeminiClient)) as IGeminiClient
             ?? throw new InvalidOperationException("Failed to get IGeminiClient from GeminiChatClient.");
 
-        var filesClient = geminiClient.V1Beta.Files;
+        // Use the portable IHostedFileClient abstraction for file management
+        // instead of the Gemini-specific IFilesClient directly.
+        using var fileClient = geminiClient.AsHostedFileClient();
 
         // Create a small CSV file in-memory to upload.
         var csvContent = """
@@ -24,13 +28,13 @@ public sealed class FileUploadExample
 
         Console.WriteLine("Uploading CSV file...");
 
-        var uploadedFile = await filesClient.UploadFileAsync(
+        var uploadedFile = await fileClient.UploadAsync(
             stream,
-            csvContent.Length,
-            new UploadFileOptions { DisplayName = "sales-data.csv", MimeType = "text/csv" },
-            cancellationToken);
+            mediaType: "text/csv",
+            fileName: "sales-data.csv",
+            cancellationToken: cancellationToken);
 
-        Console.WriteLine($"Uploaded: {uploadedFile.Name} (state: {uploadedFile.State})");
+        Console.WriteLine($"Uploaded: {uploadedFile.FileId}");
 
         // Use the uploaded file in a chat request via HostedFileContent, which maps
         // to Gemini's FileData part type.
@@ -40,7 +44,7 @@ public sealed class FileUploadExample
             [
                 new(ChatRole.User,
                 [
-                    new HostedFileContent(uploadedFile.Uri!) { MediaType = "text/csv" },
+                    uploadedFile,
                     new TextContent("Which product had the highest revenue? Reply in one sentence."),
                 ]),
             ];
@@ -56,14 +60,9 @@ public sealed class FileUploadExample
         }
         finally
         {
-            // Always delete the uploaded file to avoid leaving resources on the
-            // caller's account. The Name is in "files/{id}" format — DeleteFileAsync
-            // expects just the resource ID segment.
-            var fileId = uploadedFile.Name!.Replace("files/", "");
+            Console.WriteLine($"\nDeleting uploaded file...");
 
-            Console.WriteLine($"\nDeleting uploaded file ({fileId})...");
-
-            await filesClient.DeleteFileAsync(fileId, cancellationToken);
+            await fileClient.DeleteAsync(uploadedFile.FileId, cancellationToken: cancellationToken);
 
             Console.WriteLine("File deleted.");
         }
