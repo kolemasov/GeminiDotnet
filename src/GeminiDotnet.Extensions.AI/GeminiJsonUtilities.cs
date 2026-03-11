@@ -3,6 +3,8 @@ using Microsoft.Extensions.AI;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 
+#pragma warning disable CS0618 // Obsolete types kept for backward-compatible JSON serialization
+
 namespace GeminiDotnet.Extensions.AI;
 
 /// <summary>

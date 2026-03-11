@@ -5,6 +5,7 @@ namespace GeminiDotnet.Extensions.AI.Contents;
 /// <summary>
 /// Represents the result of a service-side code execution.
 /// </summary>
+[Obsolete("Use CodeInterpreterToolResultContent from Microsoft.Extensions.AI instead.")]
 public sealed class CodeExecutionContent : AIContent
 {
     /// <summary>

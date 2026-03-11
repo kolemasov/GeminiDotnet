@@ -1,16 +1,17 @@
-using GeminiDotnet.Extensions.AI.Contents;
 using GeminiDotnet.V1Beta;
 using GeminiDotnet.V1Beta.Models;
 using Microsoft.Extensions.AI;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 
+#pragma warning disable MEAI001 // Experimental API (CodeInterpreterToolCallContent, CodeInterpreterToolResultContent)
+
 namespace GeminiDotnet.Extensions.AI;
 
 public sealed class GeminiToMEAIMapperTests
 {
     [Fact]
-    public void CreateMappedChatResponse_WithCodeExecution_ShouldMapToText()
+    public void CreateMappedChatResponse_WithCodeExecution_ShouldMapToCodeInterpreterTypes()
     {
         // Arrange
         var response = JsonSerializer.Deserialize<GenerateContentResponse>(PythonCodeExecutionExampleResponse)!;
@@ -25,15 +26,195 @@ public sealed class GeminiToMEAIMapperTests
         var text1 = Assert.IsType<TextContent>(contents[0]);
         Assert.Equal(actualContent.Parts[0].Text, text1.Text);
 
-        var code1 = Assert.IsType<ExecutableCodeContent>(contents[1]);
-        Assert.Equal(actualContent.Parts[1].ExecutableCode!.Code, code1.Code);
-        Assert.Equal(actualContent.Parts[1].ExecutableCode!.Language, code1.Language);
+        var toolCall = Assert.IsType<CodeInterpreterToolCallContent>(contents[1]);
+        Assert.NotNull(toolCall.CallId);
+        var codeInput = Assert.Single(toolCall.Inputs!);
+        var dataContent = Assert.IsType<DataContent>(codeInput);
+        Assert.Equal("text/x-python", dataContent.MediaType);
+        var code = System.Text.Encoding.UTF8.GetString(dataContent.Data.Span);
+        Assert.Equal(actualContent.Parts[1].ExecutableCode!.Code, code);
 
-        var code2 = Assert.IsType<CodeExecutionContent>(contents[2]);
-        Assert.Equal(actualContent.Parts[2].CodeExecutionResult!.Output, code2.Output);
+        var toolResult = Assert.IsType<CodeInterpreterToolResultContent>(contents[2]);
+        Assert.Equal(toolCall.CallId, toolResult.CallId);
+        var outputContent = Assert.Single(toolResult.Outputs!);
+        var textOutput = Assert.IsType<TextContent>(outputContent);
+        Assert.Equal(actualContent.Parts[2].CodeExecutionResult!.Output, textOutput.Text);
 
         var text2 = Assert.IsType<TextContent>(contents[3]);
         Assert.Equal(actualContent.Parts[3].Text, text2.Text);
+    }
+
+    [Fact]
+    public void CreateMappedChatResponse_WithCodeExecution_ShouldPreserveOutcomeInAdditionalProperties()
+    {
+        // Arrange
+        var response = JsonSerializer.Deserialize<GenerateContentResponse>(PythonCodeExecutionExampleResponse)!;
+
+        // Act
+        var result = GeminiToMEAIMapper.CreateMappedChatResponse(response, DateTimeOffset.UtcNow);
+
+        // Assert — the execution outcome should be preserved so consumers can
+        // distinguish success from failure.
+        var toolResult = Assert.Single(result.Messages).Contents
+            .OfType<CodeInterpreterToolResultContent>()
+            .Single();
+
+        Assert.NotNull(toolResult.AdditionalProperties);
+        Assert.Equal("Ok", toolResult.AdditionalProperties["outcome"]);
+    }
+
+    [Fact]
+    public void CreateMappedChatResponse_WithFailedCodeExecution_ShouldPreserveFailedOutcome()
+    {
+        // Arrange
+        var response = new GenerateContentResponse
+        {
+            Candidates =
+            [
+                new Candidate
+                {
+                    Content = new Content
+                    {
+                        Role = "model",
+                        Parts =
+                        [
+                            new Part
+                            {
+                                ExecutableCode = new ExecutableCode
+                                {
+                                    Language = ExecutableCodeLanguage.Python,
+                                    Code = "1/0",
+                                },
+                            },
+                            new Part
+                            {
+                                CodeExecutionResult = new CodeExecutionResult
+                                {
+                                    Outcome = CodeExecutionResultOutcome.Failed,
+                                    Output = "ZeroDivisionError: division by zero",
+                                },
+                            },
+                        ],
+                    },
+                    FinishReason = CandidateFinishReason.Stop,
+                },
+            ],
+            ModelVersion = "gemini-2.0-flash",
+            ResponseId = "test-failed-exec",
+        };
+
+        // Act
+        var result = GeminiToMEAIMapper.CreateMappedChatResponse(response, DateTimeOffset.UtcNow);
+
+        // Assert
+        var toolResult = Assert.Single(result.Messages).Contents
+            .OfType<CodeInterpreterToolResultContent>()
+            .Single();
+
+        Assert.NotNull(toolResult.AdditionalProperties);
+        Assert.Equal("Failed", toolResult.AdditionalProperties["outcome"]);
+    }
+
+    [Fact]
+    public void CreateMappedChatResponse_WithUnspecifiedOutcome_ShouldNotSetAdditionalProperties()
+    {
+        // Arrange
+        var response = new GenerateContentResponse
+        {
+            Candidates =
+            [
+                new Candidate
+                {
+                    Content = new Content
+                    {
+                        Role = "model",
+                        Parts =
+                        [
+                            new Part
+                            {
+                                ExecutableCode = new ExecutableCode
+                                {
+                                    Language = ExecutableCodeLanguage.Python,
+                                    Code = "print('hi')",
+                                },
+                            },
+                            new Part
+                            {
+                                CodeExecutionResult = new CodeExecutionResult
+                                {
+                                    Outcome = CodeExecutionResultOutcome.Unspecified,
+                                    Output = "hi",
+                                },
+                            },
+                        ],
+                    },
+                    FinishReason = CandidateFinishReason.Stop,
+                },
+            ],
+            ModelVersion = "gemini-2.0-flash",
+            ResponseId = "test-unspecified-exec",
+        };
+
+        // Act
+        var result = GeminiToMEAIMapper.CreateMappedChatResponse(response, DateTimeOffset.UtcNow);
+
+        // Assert — Unspecified outcome should not pollute AdditionalProperties
+        var toolResult = Assert.Single(result.Messages).Contents
+            .OfType<CodeInterpreterToolResultContent>()
+            .Single();
+
+        Assert.Null(toolResult.AdditionalProperties);
+    }
+
+    [Fact]
+    public void CreateMappedChatResponse_WithNullCodeExecutionOutput_ShouldReturnEmptyOutputs()
+    {
+        // Arrange
+        var response = new GenerateContentResponse
+        {
+            Candidates =
+            [
+                new Candidate
+                {
+                    Content = new Content
+                    {
+                        Role = "model",
+                        Parts =
+                        [
+                            new Part
+                            {
+                                ExecutableCode = new ExecutableCode
+                                {
+                                    Language = ExecutableCodeLanguage.Python,
+                                    Code = "x = 1",
+                                },
+                            },
+                            new Part
+                            {
+                                CodeExecutionResult = new CodeExecutionResult
+                                {
+                                    Outcome = CodeExecutionResultOutcome.Ok,
+                                    Output = null,
+                                },
+                            },
+                        ],
+                    },
+                    FinishReason = CandidateFinishReason.Stop,
+                },
+            ],
+            ModelVersion = "gemini-2.0-flash",
+            ResponseId = "test-null-output-exec",
+        };
+
+        // Act
+        var result = GeminiToMEAIMapper.CreateMappedChatResponse(response, DateTimeOffset.UtcNow);
+
+        // Assert
+        var toolResult = Assert.Single(result.Messages).Contents
+            .OfType<CodeInterpreterToolResultContent>()
+            .Single();
+
+        Assert.Empty(toolResult.Outputs!);
     }
 
     [Fact]

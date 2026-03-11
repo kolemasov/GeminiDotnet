@@ -1,11 +1,11 @@
-using GeminiDotnet.Extensions.AI.Contents;
 using GeminiDotnet.Testing;
 using Microsoft.Extensions.AI;
 using System.ComponentModel;
 
-namespace GeminiDotnet.Extensions.AI;
-
 #pragma warning disable xUnit1051 // Use TestContext.Current.CancellationToken
+#pragma warning disable MEAI001 // Experimental API (CodeInterpreterToolCallContent, CodeInterpreterToolResultContent)
+
+namespace GeminiDotnet.Extensions.AI;
 
 [IntegrationTest]
 public sealed class ReadmeTests
@@ -91,8 +91,8 @@ public sealed class ReadmeTests
         Assert.NotEmpty(response.Messages);
         var message = response.Messages[0];
 
-        _ = Assert.Single(message.Contents.OfType<ExecutableCodeContent>());
-        _ = Assert.Single(message.Contents.OfType<CodeExecutionContent>());
+        _ = Assert.Single(message.Contents.OfType<CodeInterpreterToolCallContent>());
+        _ = Assert.Single(message.Contents.OfType<CodeInterpreterToolResultContent>());
 
         foreach (var content in message.Contents)
         {
