@@ -6,6 +6,8 @@ using System.Net.Mime;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+#pragma warning disable MEAI001 // Experimental API (WebSearchTool*Content)
+
 namespace GeminiDotnet.Extensions.AI;
 
 public sealed class MEAIToGeminiMapperTests
@@ -825,5 +827,34 @@ public sealed class MEAIToGeminiMapperTests
 
         // Assert
         Assert.Throws<InvalidOperationException>(act);
+    }
+
+    [Fact]
+    public void WebSearchContent_ShouldBeSkippedInReverseMapping()
+    {
+        // Arrange — an assistant message containing web search content (from a
+        // previous grounded response) should not throw when mapped back to Gemini.
+        const string callId = "web-search/test-id";
+
+        List<ChatMessage> messages =
+        [
+            new(ChatRole.Assistant,
+            [
+                new TextContent("Here are the results."),
+                new WebSearchToolCallContent(callId) { Queries = ["test query"] },
+                new WebSearchToolResultContent(callId)
+                {
+                    Results = [new UriContent("https://example.com", "text/html")],
+                },
+            ]),
+        ];
+
+        // Act
+        var request = MEAIToGeminiMapper.CreateMappedGenerateContentRequest("model", messages, null);
+
+        // Assert — only the text part should survive; web search content is skipped
+        var content = Assert.Single(request.Contents);
+        var part = Assert.Single(content.Parts!);
+        Assert.Equal("Here are the results.", part.Text);
     }
 }

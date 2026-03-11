@@ -5,7 +5,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 
-#pragma warning disable MEAI001 // Experimental API (CodeInterpreterToolCallContent, CodeInterpreterToolResultContent)
+#pragma warning disable MEAI001 // Experimental API (CodeInterpreter*, WebSearchTool*Content)
 
 namespace GeminiDotnet.Extensions.AI;
 
@@ -19,6 +19,8 @@ internal static class GeminiToMEAIMapper
 
         // Map content parts
         var contents = CreateMappedContents(candidate?.Content?.Parts) ?? [];
+
+        AppendMappedGroundingMetadata(contents, candidate?.GroundingMetadata);
 
         // Add UsageContent for streaming aggregation (consumed by ToChatResponse())
         if (CreateMappedUsageDetails(response.UsageMetadata) is { } usageDetails)
@@ -271,6 +273,62 @@ internal static class GeminiToMEAIMapper
         }
     }
 
+    private static void AppendMappedGroundingMetadata(List<AIContent> contents, GroundingMetadata? groundingMetadata)
+    {
+        if (groundingMetadata is null)
+        {
+            return;
+        }
+
+        var hasQueries = groundingMetadata.WebSearchQueries is { Count: > 0 };
+        var hasChunks = groundingMetadata.GroundingChunks is { Count: > 0 };
+
+        if (!hasQueries && !hasChunks)
+        {
+            return;
+        }
+
+        var callId = $"web-search/{Guid.NewGuid()}";
+
+        var toolCall = new WebSearchToolCallContent(callId)
+        {
+            Queries = groundingMetadata.WebSearchQueries is { } queries ? [.. queries] : null,
+            RawRepresentation = groundingMetadata,
+        };
+
+        List<AIContent>? results = null;
+        if (groundingMetadata.GroundingChunks is { } chunks)
+        {
+            results = new(chunks.Count);
+            foreach (var chunk in chunks)
+            {
+                if (chunk.Web is not { } web)
+                {
+                    continue;
+                }
+
+                var uriContent = new UriContent(web.Uri ?? string.Empty, "text/html")
+                {
+                    RawRepresentation = chunk,
+                    AdditionalProperties = web.Title is not null
+                        ? new() { ["title"] = web.Title }
+                        : null,
+                };
+
+                results.Add(uriContent);
+            }
+        }
+
+        var toolResult = new WebSearchToolResultContent(callId)
+        {
+            Results = results,
+            RawRepresentation = groundingMetadata,
+        };
+
+        contents.Add(toolCall);
+        contents.Add(toolResult);
+    }
+
     public static ChatResponse CreateMappedChatResponse(GenerateContentResponse response, DateTimeOffset createdAt)
     {
         var choices = response.Candidates?.Select(CreateMappedChatMessage).ToList();
@@ -290,12 +348,15 @@ internal static class GeminiToMEAIMapper
 
         static ChatMessage CreateMappedChatMessage(Candidate candidateResponse)
         {
+            var contents = CreateMappedContents(candidateResponse.Content?.Parts) ?? [];
+            AppendMappedGroundingMetadata(contents, candidateResponse.GroundingMetadata);
+
             return new ChatMessage
             {
                 AuthorName = null,
                 CreatedAt = null,
                 Role = CreateMappedChatRole(candidateResponse.Content?.Role),
-                Contents = CreateMappedContents(candidateResponse.Content?.Parts) ?? [],
+                Contents = contents,
                 MessageId = null,
                 RawRepresentation = candidateResponse,
                 AdditionalProperties = null
