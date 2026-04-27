@@ -39,9 +39,6 @@ internal sealed class GeminiHostedFileDownloadStream : HostedFileDownloadStream
     public override bool CanSeek => _contentStream.CanSeek;
 
     /// <inheritdoc />
-    public override bool CanWrite => _contentStream.CanWrite;
-
-    /// <inheritdoc />
     public override long Length => _contentStream.Length;
 
     /// <inheritdoc />
@@ -77,14 +74,6 @@ internal sealed class GeminiHostedFileDownloadStream : HostedFileDownloadStream
     /// <inheritdoc />
     public override long Seek(long offset, SeekOrigin origin) =>
         _contentStream.Seek(offset, origin);
-
-    /// <inheritdoc />
-    public override void SetLength(long value) =>
-        _contentStream.SetLength(value);
-
-    /// <inheritdoc />
-    public override void Write(byte[] buffer, int offset, int count) =>
-        _contentStream.Write(buffer, offset, count);
 
     /// <inheritdoc />
     protected override void Dispose(bool disposing)
